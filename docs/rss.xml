@@ -1,5 +1,43 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain.github.io</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain.github.io</link></image><lastBuildDate>Tue, 18 Nov 2025 14:45:58 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>DeepSeek 多模态大模型 Janus-Pro 本地部署教程</title><link>https://captain0005.github.io/captain.github.io/post/DeepSeek%20-duo-mo-tai-da-mo-xing-%20Janus-Pro%20-ben-di-bu-shu-jiao-cheng.html</link><description># DeepSeek 多模态大模型 Janus-Pro 本地部署教程
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain.github.io</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain.github.io</link></image><lastBuildDate>Tue, 18 Nov 2025 14:47:39 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>Boost字符串操作</title><link>https://captain0005.github.io/captain.github.io/post/Boost-zi-fu-chuan-cao-zuo.html</link><description>```c++
+
+
+ #include &lt;boost/algorithm/string.hpp&gt;
+    #include &lt;boost/regex.hpp&gt;
+    #include &lt;boost/filesystem.hpp&gt;
+
+    std::string str = 'one,two,three,four'; 
+    std::vector&lt;std::string&gt; result;
+    boost::split(result, str, boost::is_any_of(','));
+
+    for (const auto&amp; s : result) {
+        std::cout &lt;&lt; s &lt;&lt; std::endl;
+    }
+    std::string str2 = 'Hello World,Hello World';
+    boost::algorithm::replace_all(str2,'World','Boost');
+    std::cout &lt;&lt; str2 &lt;&lt; std::endl; // 输出: Hello Boost,Hello Boost
+
+    std::string str3 = '   Hello Boost   ';
+    boost::trim(str3);
+    std::cout &lt;&lt; str3 &lt;&lt; std::endl; //输出：Hello Boost
+    
+    std::string str4 = 'Hello World,Hello World';
+    boost::replace_first(str4,'World','Boost');
+    std::cout &lt;&lt; str4 &lt;&lt; std::endl; // 输出: Hello Boost,Hello World
+
+    std::string str5 = 'Hello World,Hello World';
+    boost::replace_last(str5,'World','Boost');
+    std::cout &lt;&lt; str5 &lt;&lt; std::endl; // 输出: Hello World,Hello Boost
+
+    std::string str6 = '2024-05-20 13:45:30';
+    boost::regex date_regex('-');
+    std::string result2 = boost::regex_replace(str6, date_regex, '/');
+    std::cout &lt;&lt; result2 &lt;&lt; std::endl; // 输出: 2024/05/20 13:45:30
+
+    std::string str7 = 'Apple banana apple orange APPLE,Apple,Apple,Apple';
+    boost::replace_nth(str7,'Apple',3,'Banana');
+    std::cout &lt;&lt; str7 &lt;&lt; std::endl; //输出 Apple banana apple orange APPLE,Apple,Apple,Banana
+```。</description><guid isPermaLink="true">https://captain0005.github.io/captain.github.io/post/Boost-zi-fu-chuan-cao-zuo.html</guid><pubDate>Tue, 18 Nov 2025 14:47:14 +0000</pubDate></item><item><title>DeepSeek 多模态大模型 Janus-Pro 本地部署教程</title><link>https://captain0005.github.io/captain.github.io/post/DeepSeek%20-duo-mo-tai-da-mo-xing-%20Janus-Pro%20-ben-di-bu-shu-jiao-cheng.html</link><description># DeepSeek 多模态大模型 Janus-Pro 本地部署教程
 
 ## 下载模型仓库
 
