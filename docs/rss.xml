@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Wed, 19 Nov 2025 08:21:43 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>封装async_proc 异步任务处理</title><link>https://captain0005.github.io/captain/post/feng-zhuang-async_proc%20-yi-bu-ren-wu-chu-li.html</link><description>###封装代码
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Wed, 19 Nov 2025 08:28:00 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>封装async_proc 异步任务处理</title><link>https://captain0005.github.io/captain/post/feng-zhuang-async_proc%20-yi-bu-ren-wu-chu-li.html</link><description>###封装代码
 ```
 #include &lt;iostream&gt;
 #include &lt;thread&gt;
@@ -190,7 +190,8 @@ in_queue_semaphore.wait();
 
 
 
-。</description><guid isPermaLink="true">https://captain0005.github.io/captain/post/c%2B%2B%20condition_variable%20-feng-zhuang.html</guid><pubDate>Wed, 19 Nov 2025 03:25:54 +0000</pubDate></item><item><title>vscode配置Boost库</title><link>https://captain0005.github.io/captain/post/vscode-pei-zhi-Boost-ku.html</link><description>cmake_minimum_required(VERSION 3.16.3)
+。</description><guid isPermaLink="true">https://captain0005.github.io/captain/post/c%2B%2B%20condition_variable%20-feng-zhuang.html</guid><pubDate>Wed, 19 Nov 2025 03:25:54 +0000</pubDate></item><item><title>vscode配置Boost库</title><link>https://captain0005.github.io/captain/post/vscode-pei-zhi-Boost-ku.html</link><description>```
+cmake_minimum_required(VERSION 3.16.3)
   project(testBoost VERSION 0.1.0)
   
   # 设置C++标准
