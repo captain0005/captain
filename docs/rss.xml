@@ -1,5 +1,149 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Wed, 19 Nov 2025 03:26:20 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>c++ condition_variable 封装</title><link>https://captain0005.github.io/captain/post/c%2B%2B%20condition_variable%20-feng-zhuang.html</link><description>### 封装类
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Wed, 19 Nov 2025 08:21:43 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>封装async_proc 异步任务处理</title><link>https://captain0005.github.io/captain/post/feng-zhuang-async_proc%20-yi-bu-ren-wu-chu-li.html</link><description>###封装代码
+```
+#include &lt;iostream&gt;
+#include &lt;thread&gt;
+#include &lt;mutex&gt;
+#include &lt;condition_variable&gt;
+#include &lt;queue&gt;
+#include &lt;functional&gt;
+#include &lt;atomic&gt;
+
+// 1. 定义你的信号量类（不变）
+class vp_semaphore {
+public:
+    vp_semaphore() : count_(0) {}
+    void signal() {
+        std::unique_lock&lt;std::mutex&gt; lock(mutex_);
+        ++count_;
+        cv_.notify_one();
+    }
+    void wait() {
+        std::unique_lock&lt;std::mutex&gt; lock(mutex_);
+        cv_.wait(lock, [=] { return count_ &gt; 0; });
+        --count_;
+    }
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    int count_;
+};
+
+
+class async_proc {
+public:
+    using Task = std::function&lt;void()&gt;;
+    async_proc()
+    {
+        tid = std::thread([this]() {
+            while (live) {
+                semaphore_cv.wait();
+                if (!live)
+                    break;
+                // std::lock_guard&lt;std::mutex&gt; lock(task_mtx); 可以不加 semaphore_cv中已经有对 task_que数量的判断
+                if (task_que.empty()) {
+                    continue;
+                }
+                auto tsk = task_que.front();
+                task_que.pop();
+                tsk();
+            }
+        });
+    }
+    ~async_proc()
+    {
+        live = false;
+        semaphore_cv.signal();
+        tid.join();
+    }
+
+    template &lt;typename F, typename... Args&gt; void post_task(F &amp;&amp;f, Args &amp;&amp;...args)
+    {
+        Task tsk = std::bind(std::forward&lt;F&gt;(f), std::forward&lt;Args&gt;(args)...);
+        std::lock_guard&lt;std::mutex&gt; lock(task_mtx);
+        task_que.push(tsk);
+        semaphore_cv.signal();
+    }
+
+    async_proc(const async_proc &amp;) = delete;
+    async_proc &amp;operator=(const async_proc &amp;) = delete;
+
+private:
+    std::queue&lt;Task&gt; task_que;
+    std::mutex task_mtx;
+    //声明为原子变量，确保在多线程环境下的安全访问
+    std::atomic&lt;bool&gt; live{true};
+    std::thread tid;
+    vp_semaphore semaphore_cv;
+};
+```
+
+###使用示例
+```
+// 简单的函数示例
+void print_hello() {
+    std::cout &lt;&lt; 'Hello from thread! Thread ID: ' &lt;&lt; std::this_thread::get_id() &lt;&lt; std::endl;
+}
+
+// 带参数的函数示例
+void print_message(const std::string&amp; message, int number) {
+    std::cout &lt;&lt; 'Message: ' &lt;&lt; message &lt;&lt; ', Number: ' &lt;&lt; number 
+              &lt;&lt; ' (Thread ID: ' &lt;&lt; std::this_thread::get_id() &lt;&lt; ')' &lt;&lt; std::endl;
+}
+
+// 带返回值的函数示例（在异步环境中返回值会被忽略，除非通过引用或指针传递）
+void calculate_and_store(int a, int b, int&amp; result) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 模拟耗时操作
+    result = a + b;
+    std::cout &lt;&lt; 'Calculated: ' &lt;&lt; a &lt;&lt; ' + ' &lt;&lt; b &lt;&lt; ' = ' &lt;&lt; result &lt;&lt; std::endl;
+}
+
+int main() {
+    std::cout &lt;&lt; 'Main thread ID: ' &lt;&lt; std::this_thread::get_id() &lt;&lt; std::endl;
+    
+    // 创建异步处理器实例
+    async_proc processor;
+    
+    // 示例1：提交无参函数
+    std::cout &lt;&lt; 'Submitting print_hello task...' &lt;&lt; std::endl;
+    processor.post_task(print_hello);
+    
+    // 示例2：提交带参数的函数
+    std::cout &lt;&lt; 'Submitting print_message task...' &lt;&lt; std::endl;
+    processor.post_task(print_message, 'Async task', 42);
+    
+    // 示例3：提交Lambda表达式
+    std::cout &lt;&lt; 'Submitting lambda task...' &lt;&lt; std::endl;
+    processor.post_task([]() {
+        std::cout &lt;&lt; 'Lambda executed! ' 
+                  &lt;&lt; 'Current time: ' &lt;&lt; std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) &lt;&lt; std::endl;
+    });
+    
+    // 示例4：提交带状态的任务（使用引用传递结果）
+    int result = 0;
+    std::cout &lt;&lt; 'Submitting calculation task...' &lt;&lt; std::endl;
+    processor.post_task(calculate_and_store, 10, 32, std::ref(result));
+    
+    // 示例5：提交多个任务，展示并发执行
+    std::cout &lt;&lt; 'Submitting multiple tasks...' &lt;&lt; std::endl;
+    for (int i = 0; i &lt; 5; ++i) {
+        processor.post_task([i]() {
+            std::cout &lt;&lt; 'Batch task ' &lt;&lt; i &lt;&lt; ' executing...' &lt;&lt; std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 模拟不同的执行时间
+            std::cout &lt;&lt; 'Batch task ' &lt;&lt; i &lt;&lt; ' completed.' &lt;&lt; std::endl;
+        });
+    }
+    
+    // 等待所有任务完成
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    
+    // 显示通过引用获取的计算结果
+    std::cout &lt;&lt; 'Final result from calculation: ' &lt;&lt; result &lt;&lt; std::endl;
+    
+    std::cout &lt;&lt; 'Main function completed.' &lt;&lt; std::endl;
+    return 0;
+}
+```。</description><guid isPermaLink="true">https://captain0005.github.io/captain/post/feng-zhuang-async_proc%20-yi-bu-ren-wu-chu-li.html</guid><pubDate>Wed, 19 Nov 2025 08:21:14 +0000</pubDate></item><item><title>c++ condition_variable 封装</title><link>https://captain0005.github.io/captain/post/c%2B%2B%20condition_variable%20-feng-zhuang.html</link><description>### 封装类
 ```
 
 #include &lt;condition_variable&gt;
