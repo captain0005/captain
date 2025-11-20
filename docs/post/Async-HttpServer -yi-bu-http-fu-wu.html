@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html data-color-mode="light" data-dark-theme="dark" data-light-theme="light" lang="zh-CN">
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="content-type" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <link href='https://mirrors.sustech.edu.cn/cdnjs/ajax/libs/Primer/21.0.7/primer.css' rel='stylesheet' />
+    
+    <link rel="icon" href="https://github.githubassets.com/favicons/favicon.svg"><script>
+        let theme = localStorage.getItem("meek_theme") || "light";
+        document.documentElement.setAttribute("data-color-mode", theme);
+    </script>
+<meta name="description" content="```
+#include <boost/asio.hpp>
+#include <boost/beast.hpp>
+#include <boost/json.hpp>
+#include <iostream>
+#include <functional>
+#include <map>
+#include <string>
+#include <thread>
+#include <boost/thread.hpp>
+#include <csignal>
+#include <vector>
+#include <memory>
+
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace json = boost::json;
+using tcp = asio::ip::tcp;
+
+// 全局标志，用于控制服务器退出
+volatile std::sig_atomic_t g_running = true;
+
+// 信号处理函数
+void signalHandler(int signal) {
+    std::cout << 'Received signal ' << signal << ', shutting down...' << std::endl;
+    g_running = false;
+}
+
+// 定义处理器函数类型
+typedef std::function<void(const http::request<http::string_body>&, http::response<http::string_body>&)> RequestHandler;
+
+// 路由管理器类，用于注册和查找路由
+class Router {
+private:
+    std::map<std::string, RequestHandler> routes;
+    std::string getRouteKey(http::verb method, const std::string& target) {
+        return std::to_string(static_cast<int>(method)) + ':' + target;
+    }
+public:
+    void registerRoute(http::verb method, const std::string& target, RequestHandler handler) {
+        std::string key = getRouteKey(method, target);
+        routes[key] = handler;
+    }
+    bool handleRequest(const http::request<http::string_body>& req, http::response<http::string_body>& res) {
+        std::string key = getRouteKey(req.method(), std::string(req.target()));
+        auto it = routes.find(key);
+        if (it != routes.end()) {
+            it->second(req, res);
+            return true;
+        }
+        return false;
+    }
+};
+
+// 全局路由管理器实例
+Router g_router;
+
+// 初始化路由表
+void initializeRoutes() {
+    g_router.registerRoute(http::verb::get, '/status', [](const http::request<http::string_body>& req, http::response<http::string_body>& res) {
+        json::object response_json;
+        response_json['status'] = 'Server is running!';
+        res.result(http::status::ok);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+
+    g_router.registerRoute(http::verb::post, '/greet', [](const http::request<http::string_body>& req, http::response<http::string_body>& res) {
+        json::object response_json;
+        try {
+            json::value parsed_body = json::parse(req.body());
+            std::string name = parsed_body.as_object()['name'].as_string().c_str();
+            response_json['message'] = 'Hello, ' + name + '!';
+        } catch (...) {
+            response_json['error'] = 'Invalid JSON format.';
+        }
+        res.result(http::status::ok);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+    // 可以根据需要继续添加更多路由...
+}
+
+// 处理请求的函数
+void handle_request(
+    http::request<http::string_body> req,
+    http::response<http::string_body>& res
+) {
+    json::object response_json;
+    std::cout << 'Method: ' << req.method() << '...\n';
+    std::cout << 'Target: ' << req.target() << '...\n';
+    std::cout << 'Body: ' << req.body() << '...\n\n';
+    if (!g_router.handleRequest(req, res)) {
+        response_json['error'] = 'Unknown endpoint.';
+        res.result(http::status::not_found);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    }
+}
+
+// 异步会话类
+class Session : public std::enable_shared_from_this<Session> {
+public:
+    Session(tcp::socket socket)
+        : socket_(std::move(socket)) {}
+
+    void start() {
+        do_read();
+    }
+
+private:
+    tcp::socket socket_;
+    beast::flat_buffer buffer_;
+    http::request<http::string_body> req_;
+
+    void do_read() {
+        auto self = shared_from_this();
+        http::async_read(socket_, buffer_, req_,
+            [self](beast::error_code ec, std::size_t) {
+                if (!ec) {
+                    self->handle_request();
+                }
+                // 连接关闭由客户端控制，或可在此处关闭
+            });
+    }
+
+    void handle_request() {
+        http::response<http::string_body> res;
+        ::handle_request(req_, res);
+
+        auto self = shared_from_this();
+        http::async_write(socket_, res,
+            [self](beast::error_code ec, std::size_t) {
+                beast::error_code ignore_ec;
+                self->socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                // 会话对象自动析构
+            });
+    }
+};
+
+// 异步accept
+void do_accept(asio::io_context& ioc, tcp::acceptor& acceptor) {
+    acceptor.async_accept(
+        [&ioc, &acceptor](beast::error_code ec, tcp::socket socket) {
+            if (!ec) {
+                std::make_shared<Session>(std::move(socket))->start();
+            }
+            if (g_running) {
+                do_accept(ioc, acceptor);
+            }
+        }
+    );
+}
+
+// 异步服务器主函数
+void run_server(asio::io_context& ioc, unsigned short port, unsigned int thread_pool_size) {
+    tcp::acceptor acceptor(ioc, tcp::endpoint(tcp::v4(), port));
+    do_accept(ioc, acceptor);
+
+    std::cout << 'HTTP Server running on port ' << port << '...\n\n';
+    std::vector<std::thread> threads;
+    for (unsigned int i = 0; i < thread_pool_size; ++i) {
+        threads.emplace_back([&ioc]() { ioc.run(); });
+    }
+    for (auto& t : threads) t.join();
+    std::cout << 'Server shutdown complete\n';
+}
+
+int main() {
+    try {
+        std::signal(SIGINT, signalHandler);
+        std::signal(SIGTERM, signalHandler);
+
+        initializeRoutes();
+        asio::io_context io_context;
+
+        unsigned int thread_pool_size = std::thread::hardware_concurrency();
+        if (thread_pool_size == 0)
+            thread_pool_size = 4;
+        run_server(io_context, 8080, thread_pool_size);
+    }
+    catch (std::exception& e) {
+        std::cerr << 'Server error: ' << e.what() << '\n';
+    }
+    return 0;
+}
+```
+###run_server函数是异步HTTP服务器的核心启动与管理函数，主要功能如下：
+
+**服务器初始化与启动：**
+
+创建TCP acceptor并绑定到指定的IPv4端口
+调用do_accept函数启动异步连接接受循环，使服务器能够非阻塞地接受新连接
+输出服务器启动信息，指示服务器正在哪个端口运行
+**线程池创建与管理：**
+
+创建std::vector<std::thread>容器来管理工作线程池
+根据thread_pool_size参数，创建指定数量的工作线程
+每个线程都运行io_context.run()，启动I/O事件循环
+选中的代码行threads.emplace_back([&ioc]() { ioc.run(); });创建一个新线程并捕获io_context引用，使该线程开始处理异步操作队列
+**服务器生命周期管理：**
+
+使用join()等待所有工作线程完成，确保服务器优雅关闭
+线程池中的所有线程共享同一个io_context实例，协同处理异步事件
+当io_context停止时（通常由信号处理器设置g_running=false触发），所有线程会退出其事件循环
+输出服务器关闭完成的信息
+**工作原理：**
+
+这种设计采用了Boost.Asio的'线程池 + 单io_context'模式，提高了服务器处理并发请求的能力
+主线程负责初始化和等待，而工作线程处理实际的网络I/O事件
+异步接受连接和异步处理请求相结合，实现了高性能的非阻塞服务器架构
+该函数是整个异步HTTP服务器的骨架，通过线程池机制充分利用多核CPU资源，同时保持异步非阻塞的高效特性。">
+<meta property="og:title" content="Async-HttpServer 异步http服务">
+<meta property="og:description" content="```
+#include <boost/asio.hpp>
+#include <boost/beast.hpp>
+#include <boost/json.hpp>
+#include <iostream>
+#include <functional>
+#include <map>
+#include <string>
+#include <thread>
+#include <boost/thread.hpp>
+#include <csignal>
+#include <vector>
+#include <memory>
+
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace json = boost::json;
+using tcp = asio::ip::tcp;
+
+// 全局标志，用于控制服务器退出
+volatile std::sig_atomic_t g_running = true;
+
+// 信号处理函数
+void signalHandler(int signal) {
+    std::cout << 'Received signal ' << signal << ', shutting down...' << std::endl;
+    g_running = false;
+}
+
+// 定义处理器函数类型
+typedef std::function<void(const http::request<http::string_body>&, http::response<http::string_body>&)> RequestHandler;
+
+// 路由管理器类，用于注册和查找路由
+class Router {
+private:
+    std::map<std::string, RequestHandler> routes;
+    std::string getRouteKey(http::verb method, const std::string& target) {
+        return std::to_string(static_cast<int>(method)) + ':' + target;
+    }
+public:
+    void registerRoute(http::verb method, const std::string& target, RequestHandler handler) {
+        std::string key = getRouteKey(method, target);
+        routes[key] = handler;
+    }
+    bool handleRequest(const http::request<http::string_body>& req, http::response<http::string_body>& res) {
+        std::string key = getRouteKey(req.method(), std::string(req.target()));
+        auto it = routes.find(key);
+        if (it != routes.end()) {
+            it->second(req, res);
+            return true;
+        }
+        return false;
+    }
+};
+
+// 全局路由管理器实例
+Router g_router;
+
+// 初始化路由表
+void initializeRoutes() {
+    g_router.registerRoute(http::verb::get, '/status', [](const http::request<http::string_body>& req, http::response<http::string_body>& res) {
+        json::object response_json;
+        response_json['status'] = 'Server is running!';
+        res.result(http::status::ok);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+
+    g_router.registerRoute(http::verb::post, '/greet', [](const http::request<http::string_body>& req, http::response<http::string_body>& res) {
+        json::object response_json;
+        try {
+            json::value parsed_body = json::parse(req.body());
+            std::string name = parsed_body.as_object()['name'].as_string().c_str();
+            response_json['message'] = 'Hello, ' + name + '!';
+        } catch (...) {
+            response_json['error'] = 'Invalid JSON format.';
+        }
+        res.result(http::status::ok);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+    // 可以根据需要继续添加更多路由...
+}
+
+// 处理请求的函数
+void handle_request(
+    http::request<http::string_body> req,
+    http::response<http::string_body>& res
+) {
+    json::object response_json;
+    std::cout << 'Method: ' << req.method() << '...\n';
+    std::cout << 'Target: ' << req.target() << '...\n';
+    std::cout << 'Body: ' << req.body() << '...\n\n';
+    if (!g_router.handleRequest(req, res)) {
+        response_json['error'] = 'Unknown endpoint.';
+        res.result(http::status::not_found);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    }
+}
+
+// 异步会话类
+class Session : public std::enable_shared_from_this<Session> {
+public:
+    Session(tcp::socket socket)
+        : socket_(std::move(socket)) {}
+
+    void start() {
+        do_read();
+    }
+
+private:
+    tcp::socket socket_;
+    beast::flat_buffer buffer_;
+    http::request<http::string_body> req_;
+
+    void do_read() {
+        auto self = shared_from_this();
+        http::async_read(socket_, buffer_, req_,
+            [self](beast::error_code ec, std::size_t) {
+                if (!ec) {
+                    self->handle_request();
+                }
+                // 连接关闭由客户端控制，或可在此处关闭
+            });
+    }
+
+    void handle_request() {
+        http::response<http::string_body> res;
+        ::handle_request(req_, res);
+
+        auto self = shared_from_this();
+        http::async_write(socket_, res,
+            [self](beast::error_code ec, std::size_t) {
+                beast::error_code ignore_ec;
+                self->socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                // 会话对象自动析构
+            });
+    }
+};
+
+// 异步accept
+void do_accept(asio::io_context& ioc, tcp::acceptor& acceptor) {
+    acceptor.async_accept(
+        [&ioc, &acceptor](beast::error_code ec, tcp::socket socket) {
+            if (!ec) {
+                std::make_shared<Session>(std::move(socket))->start();
+            }
+            if (g_running) {
+                do_accept(ioc, acceptor);
+            }
+        }
+    );
+}
+
+// 异步服务器主函数
+void run_server(asio::io_context& ioc, unsigned short port, unsigned int thread_pool_size) {
+    tcp::acceptor acceptor(ioc, tcp::endpoint(tcp::v4(), port));
+    do_accept(ioc, acceptor);
+
+    std::cout << 'HTTP Server running on port ' << port << '...\n\n';
+    std::vector<std::thread> threads;
+    for (unsigned int i = 0; i < thread_pool_size; ++i) {
+        threads.emplace_back([&ioc]() { ioc.run(); });
+    }
+    for (auto& t : threads) t.join();
+    std::cout << 'Server shutdown complete\n';
+}
+
+int main() {
+    try {
+        std::signal(SIGINT, signalHandler);
+        std::signal(SIGTERM, signalHandler);
+
+        initializeRoutes();
+        asio::io_context io_context;
+
+        unsigned int thread_pool_size = std::thread::hardware_concurrency();
+        if (thread_pool_size == 0)
+            thread_pool_size = 4;
+        run_server(io_context, 8080, thread_pool_size);
+    }
+    catch (std::exception& e) {
+        std::cerr << 'Server error: ' << e.what() << '\n';
+    }
+    return 0;
+}
+```
+###run_server函数是异步HTTP服务器的核心启动与管理函数，主要功能如下：
+
+**服务器初始化与启动：**
+
+创建TCP acceptor并绑定到指定的IPv4端口
+调用do_accept函数启动异步连接接受循环，使服务器能够非阻塞地接受新连接
+输出服务器启动信息，指示服务器正在哪个端口运行
+**线程池创建与管理：**
+
+创建std::vector<std::thread>容器来管理工作线程池
+根据thread_pool_size参数，创建指定数量的工作线程
+每个线程都运行io_context.run()，启动I/O事件循环
+选中的代码行threads.emplace_back([&ioc]() { ioc.run(); });创建一个新线程并捕获io_context引用，使该线程开始处理异步操作队列
+**服务器生命周期管理：**
+
+使用join()等待所有工作线程完成，确保服务器优雅关闭
+线程池中的所有线程共享同一个io_context实例，协同处理异步事件
+当io_context停止时（通常由信号处理器设置g_running=false触发），所有线程会退出其事件循环
+输出服务器关闭完成的信息
+**工作原理：**
+
+这种设计采用了Boost.Asio的'线程池 + 单io_context'模式，提高了服务器处理并发请求的能力
+主线程负责初始化和等待，而工作线程处理实际的网络I/O事件
+异步接受连接和异步处理请求相结合，实现了高性能的非阻塞服务器架构
+该函数是整个异步HTTP服务器的骨架，通过线程池机制充分利用多核CPU资源，同时保持异步非阻塞的高效特性。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://captain0005.github.io/captain/post/Async-HttpServer%20-yi-bu-http-fu-wu.html">
+<meta property="og:image" content="https://github.githubassets.com/favicons/favicon.svg">
+<title>Async-HttpServer 异步http服务</title>
+
+
+
+</head>
+<style>
+body{box-sizing: border-box;min-width: 200px;max-width: 900px;margin: 20px auto;padding: 45px;font-size: 16px;font-family: sans-serif;line-height: 1.25;}
+#header{display:flex;padding-bottom:8px;border-bottom: 1px solid var(--borderColor-muted, var(--color-border-muted));margin-bottom: 16px;}
+#footer {margin-top:64px; text-align: center;font-size: small;}
+
+</style>
+
+<style>
+.postTitle{margin: auto 0;font-size:40px;font-weight:bold;}
+.title-right{display:flex;margin:auto 0 0 auto;}
+.title-right .circle{padding: 14px 16px;margin-right:8px;}
+#postBody{border-bottom: 1px solid var(--color-border-default);padding-bottom:36px;}
+#postBody hr{height:2px;}
+#cmButton{height:48px;margin-top:48px;}
+#comments{margin-top:64px;}
+.g-emoji{font-size:24px;}
+@media (max-width: 600px) {
+    body {padding: 8px;}
+    .postTitle{font-size:24px;}
+}
+.copy-feedback {
+    display: none;
+    position: absolute;
+    top: 10px;
+    right: 50px;
+    color: var(--color-fg-on-emphasis);
+    background-color: var(--color-fg-muted);
+    border-radius: 3px;
+    padding: 5px 8px;
+    font-size: 12px;
+}
+</style>
+
+
+
+
+<body>
+    <div id="header">
+<h1 class="postTitle">Async-HttpServer 异步http服务</h1>
+<div class="title-right">
+    <a href="https://captain0005.github.io/captain" id="buttonHome" class="btn btn-invisible circle" title="首页">
+        <svg class="octicon" width="16" height="16">
+            <path id="pathHome" fill-rule="evenodd"></path>
+        </svg>
+    </a>
+    
+    <a href="https://github.com/captain0005/captain/issues/9" target="_blank" class="btn btn-invisible circle" title="Issue">
+        <svg class="octicon" width="16" height="16">
+            <path id="pathIssue" fill-rule="evenodd"></path>
+        </svg>
+    </a>
+    
+
+    <a class="btn btn-invisible circle" onclick="modeSwitch();" title="切换主题">
+        <svg class="octicon" width="16" height="16" >
+            <path id="themeSwitch" fill-rule="evenodd"></path>
+        </svg>
+    </a>
+
+</div>
+</div>
+    <div id="content">
+<div class="markdown-body" id="postBody"><pre class="notranslate"><code class="notranslate">#include &lt;boost/asio.hpp&gt;
+#include &lt;boost/beast.hpp&gt;
+#include &lt;boost/json.hpp&gt;
+#include &lt;iostream&gt;
+#include &lt;functional&gt;
+#include &lt;map&gt;
+#include &lt;string&gt;
+#include &lt;thread&gt;
+#include &lt;boost/thread.hpp&gt;
+#include &lt;csignal&gt;
+#include &lt;vector&gt;
+#include &lt;memory&gt;
+
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace json = boost::json;
+using tcp = asio::ip::tcp;
+
+// 全局标志，用于控制服务器退出
+volatile std::sig_atomic_t g_running = true;
+
+// 信号处理函数
+void signalHandler(int signal) {
+    std::cout &lt;&lt; "Received signal " &lt;&lt; signal &lt;&lt; ", shutting down..." &lt;&lt; std::endl;
+    g_running = false;
+}
+
+// 定义处理器函数类型
+typedef std::function&lt;void(const http::request&lt;http::string_body&gt;&amp;, http::response&lt;http::string_body&gt;&amp;)&gt; RequestHandler;
+
+// 路由管理器类，用于注册和查找路由
+class Router {
+private:
+    std::map&lt;std::string, RequestHandler&gt; routes;
+    std::string getRouteKey(http::verb method, const std::string&amp; target) {
+        return std::to_string(static_cast&lt;int&gt;(method)) + ":" + target;
+    }
+public:
+    void registerRoute(http::verb method, const std::string&amp; target, RequestHandler handler) {
+        std::string key = getRouteKey(method, target);
+        routes[key] = handler;
+    }
+    bool handleRequest(const http::request&lt;http::string_body&gt;&amp; req, http::response&lt;http::string_body&gt;&amp; res) {
+        std::string key = getRouteKey(req.method(), std::string(req.target()));
+        auto it = routes.find(key);
+        if (it != routes.end()) {
+            it-&gt;second(req, res);
+            return true;
+        }
+        return false;
+    }
+};
+
+// 全局路由管理器实例
+Router g_router;
+
+// 初始化路由表
+void initializeRoutes() {
+    g_router.registerRoute(http::verb::get, "/status", [](const http::request&lt;http::string_body&gt;&amp; req, http::response&lt;http::string_body&gt;&amp; res) {
+        json::object response_json;
+        response_json["status"] = "Server is running!";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+
+    g_router.registerRoute(http::verb::post, "/greet", [](const http::request&lt;http::string_body&gt;&amp; req, http::response&lt;http::string_body&gt;&amp; res) {
+        json::object response_json;
+        try {
+            json::value parsed_body = json::parse(req.body());
+            std::string name = parsed_body.as_object()["name"].as_string().c_str();
+            response_json["message"] = "Hello, " + name + "!";
+        } catch (...) {
+            response_json["error"] = "Invalid JSON format.";
+        }
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+    // 可以根据需要继续添加更多路由...
+}
+
+// 处理请求的函数
+void handle_request(
+    http::request&lt;http::string_body&gt; req,
+    http::response&lt;http::string_body&gt;&amp; res
+) {
+    json::object response_json;
+    std::cout &lt;&lt; "Method: " &lt;&lt; req.method() &lt;&lt; "...\n";
+    std::cout &lt;&lt; "Target: " &lt;&lt; req.target() &lt;&lt; "...\n";
+    std::cout &lt;&lt; "Body: " &lt;&lt; req.body() &lt;&lt; "...\n\n";
+    if (!g_router.handleRequest(req, res)) {
+        response_json["error"] = "Unknown endpoint.";
+        res.result(http::status::not_found);
+        res.set(http::field::content_type, "application/json");
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    }
+}
+
+// 异步会话类
+class Session : public std::enable_shared_from_this&lt;Session&gt; {
+public:
+    Session(tcp::socket socket)
+        : socket_(std::move(socket)) {}
+
+    void start() {
+        do_read();
+    }
+
+private:
+    tcp::socket socket_;
+    beast::flat_buffer buffer_;
+    http::request&lt;http::string_body&gt; req_;
+
+    void do_read() {
+        auto self = shared_from_this();
+        http::async_read(socket_, buffer_, req_,
+            [self](beast::error_code ec, std::size_t) {
+                if (!ec) {
+                    self-&gt;handle_request();
+                }
+                // 连接关闭由客户端控制，或可在此处关闭
+            });
+    }
+
+    void handle_request() {
+        http::response&lt;http::string_body&gt; res;
+        ::handle_request(req_, res);
+
+        auto self = shared_from_this();
+        http::async_write(socket_, res,
+            [self](beast::error_code ec, std::size_t) {
+                beast::error_code ignore_ec;
+                self-&gt;socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                // 会话对象自动析构
+            });
+    }
+};
+
+// 异步accept
+void do_accept(asio::io_context&amp; ioc, tcp::acceptor&amp; acceptor) {
+    acceptor.async_accept(
+        [&amp;ioc, &amp;acceptor](beast::error_code ec, tcp::socket socket) {
+            if (!ec) {
+                std::make_shared&lt;Session&gt;(std::move(socket))-&gt;start();
+            }
+            if (g_running) {
+                do_accept(ioc, acceptor);
+            }
+        }
+    );
+}
+
+// 异步服务器主函数
+void run_server(asio::io_context&amp; ioc, unsigned short port, unsigned int thread_pool_size) {
+    tcp::acceptor acceptor(ioc, tcp::endpoint(tcp::v4(), port));
+    do_accept(ioc, acceptor);
+
+    std::cout &lt;&lt; "HTTP Server running on port " &lt;&lt; port &lt;&lt; "...\n\n";
+    std::vector&lt;std::thread&gt; threads;
+    for (unsigned int i = 0; i &lt; thread_pool_size; ++i) {
+        threads.emplace_back([&amp;ioc]() { ioc.run(); });
+    }
+    for (auto&amp; t : threads) t.join();
+    std::cout &lt;&lt; "Server shutdown complete\n";
+}
+
+int main() {
+    try {
+        std::signal(SIGINT, signalHandler);
+        std::signal(SIGTERM, signalHandler);
+
+        initializeRoutes();
+        asio::io_context io_context;
+
+        unsigned int thread_pool_size = std::thread::hardware_concurrency();
+        if (thread_pool_size == 0)
+            thread_pool_size = 4;
+        run_server(io_context, 8080, thread_pool_size);
+    }
+    catch (std::exception&amp; e) {
+        std::cerr &lt;&lt; "Server error: " &lt;&lt; e.what() &lt;&lt; "\n";
+    }
+    return 0;
+}
+</code></pre>
+<p>###run_server函数是异步HTTP服务器的核心启动与管理函数，主要功能如下：</p>
+<p><strong>服务器初始化与启动：</strong></p>
+<p>创建TCP acceptor并绑定到指定的IPv4端口<br>
+调用do_accept函数启动异步连接接受循环，使服务器能够非阻塞地接受新连接<br>
+输出服务器启动信息，指示服务器正在哪个端口运行<br>
+<strong>线程池创建与管理：</strong></p>
+<p>创建std::vectorstd::thread容器来管理工作线程池<br>
+根据thread_pool_size参数，创建指定数量的工作线程<br>
+每个线程都运行io_context.run()，启动I/O事件循环<br>
+选中的代码行threads.emplace_back(<a href="">&amp;ioc</a> { ioc.run(); });创建一个新线程并捕获io_context引用，使该线程开始处理异步操作队列<br>
+<strong>服务器生命周期管理：</strong></p>
+<p>使用join()等待所有工作线程完成，确保服务器优雅关闭<br>
+线程池中的所有线程共享同一个io_context实例，协同处理异步事件<br>
+当io_context停止时（通常由信号处理器设置g_running=false触发），所有线程会退出其事件循环<br>
+输出服务器关闭完成的信息<br>
+<strong>工作原理：</strong></p>
+<p>这种设计采用了Boost.Asio的"线程池 + 单io_context"模式，提高了服务器处理并发请求的能力<br>
+主线程负责初始化和等待，而工作线程处理实际的网络I/O事件<br>
+异步接受连接和异步处理请求相结合，实现了高性能的非阻塞服务器架构<br>
+该函数是整个异步HTTP服务器的骨架，通过线程池机制充分利用多核CPU资源，同时保持异步非阻塞的高效特性。</p>
+<p>###HTTP请求在线程池中的处理流程遵循Boost.Asio的异步事件驱动模型，具体过程如下：</p>
+<p><strong>1. 异步连接接受阶段</strong><br>
+当客户端发起连接请求时：</p>
+<p>do_accept函数调用acceptor.async_accept()发起非阻塞异步接受操作<br>
+这个操作会被提交到io_context的事件队列中<br>
+线程池中的任一工作线程（通过ioc.run()）会处理这个异步接受操作<br>
+当有连接到达时，系统会从线程池中选择一个线程来执行回调函数<br>
+<strong>2. 请求处理初始化阶段</strong><br>
+连接接受成功后：</p>
+<p>回调函数中创建Session共享指针对象：std::make_shared(std::move(socket))-&gt;start()<br>
+这个操作仍然在线程池中的线程上执行<br>
+Session::start()方法被调用，启动请求处理流程<br>
+<strong>3. 异步请求读取阶段</strong><br>
+在Session::do_read()中：</p>
+<p>调用http::async_read()发起异步读取HTTP请求<br>
+这个异步操作再次被提交到io_context事件队列<br>
+此时执行权会交还给线程池，当前线程可以继续处理其他事件<br>
+当有数据到达时，系统会再次从线程池中分配一个可用线程来执行读取完成的回调<br>
+<strong>4. 请求处理与响应阶段</strong><br>
+请求读取完成后：</p>
+<p>回调函数中调用self-&gt;handle_request()处理请求<br>
+请求处理可以在任意一个线程池线程上执行<br>
+处理完请求后，调用http::async_write()异步发送响应<br>
+响应发送完成后关闭连接<br>
+###线程池调度机制<br>
+<strong>整个过程中，线程池的工作原理是：</strong></p>
+<p>所有线程共享同一个io_context实例，通过ioc.run()启动事件循环<br>
+当有异步操作完成（连接到达、数据可读、写入完成等），io_context会从事件队列中取出对应的回调任务<br>
+从线程池中选择一个可用的工作线程来执行该回调任务<br>
+线程执行完回调后，会继续等待处理io_context中的下一个任务<br>
+<strong>关键技术点</strong><br>
+非阻塞模型：所有I/O操作都是异步非阻塞的，线程不会被长时间阻塞在I/O等待上<br>
+共享执行上下文：多线程共享同一个io_context，避免了线程间同步的复杂性<br>
+任务调度：Boost.Asio自动负责将异步任务分发给可用线程，实现负载均衡<br>
+零拷贝优化：通过std::move避免不必要的数据拷贝，提高性能<br>
+这种设计使得服务器能够高效处理大量并发连接，每个连接的各个阶段（接受、读取、处理、响应）可能在不同的线程上执行，但都是由同一个线程池统一调度管理。</p></div>
+<div style="font-size:small;margin-top:8px;float:right;"></div>
+
+<button class="btn btn-block" type="button" onclick="openComments()" id="cmButton">评论</button>
+<div class="comments" id="comments"></div>
+
+</div>
+    <div id="footer"><div id="footer1">Copyright © <span id="copyrightYear"></span> <a href="https://captain0005.github.io/captain">Blog Title</a></div>
+<div id="footer2">
+    <span id="runday"></span><span>Powered by <a href="https://meekdai.com/Gmeek.html" target="_blank">Gmeek</a></span>
+</div>
+
+<script>
+var now=new Date();
+document.getElementById("copyrightYear").innerHTML=now.getFullYear();
+
+if(""!=""){
+    var startSite=new Date("");
+    var diff=now.getTime()-startSite.getTime();
+    var diffDay=Math.floor(diff/(1000*60*60*24));
+    document.getElementById("runday").innerHTML="网站运行"+diffDay+"天"+" • ";
+}
+</script></div>
+</body>
+<script>
+var IconList={'sun': 'M8 10.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5zM8 12a4 4 0 100-8 4 4 0 000 8zM8 0a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0V.75A.75.75 0 018 0zm0 13a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0v-1.5A.75.75 0 018 13zM2.343 2.343a.75.75 0 011.061 0l1.06 1.061a.75.75 0 01-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zm9.193 9.193a.75.75 0 011.06 0l1.061 1.06a.75.75 0 01-1.06 1.061l-1.061-1.06a.75.75 0 010-1.061zM16 8a.75.75 0 01-.75.75h-1.5a.75.75 0 010-1.5h1.5A.75.75 0 0116 8zM3 8a.75.75 0 01-.75.75H.75a.75.75 0 010-1.5h1.5A.75.75 0 013 8zm10.657-5.657a.75.75 0 010 1.061l-1.061 1.06a.75.75 0 11-1.06-1.06l1.06-1.06a.75.75 0 011.06 0zm-9.193 9.193a.75.75 0 010 1.06l-1.06 1.061a.75.75 0 11-1.061-1.06l1.06-1.061a.75.75 0 011.061 0z', 'moon': 'M9.598 1.591a.75.75 0 01.785-.175 7 7 0 11-8.967 8.967.75.75 0 01.961-.96 5.5 5.5 0 007.046-7.046.75.75 0 01.175-.786zm1.616 1.945a7 7 0 01-7.678 7.678 5.5 5.5 0 107.678-7.678z', 'sync': 'M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z', 'home': 'M6.906.664a1.749 1.749 0 0 1 2.187 0l5.25 4.2c.415.332.657.835.657 1.367v7.019A1.75 1.75 0 0 1 13.25 15h-3.5a.75.75 0 0 1-.75-.75V9H7v5.25a.75.75 0 0 1-.75.75h-3.5A1.75 1.75 0 0 1 1 13.25V6.23c0-.531.242-1.034.657-1.366l5.25-4.2Zm1.25 1.171a.25.25 0 0 0-.312 0l-5.25 4.2a.25.25 0 0 0-.094.196v7.019c0 .138.112.25.25.25H5.5V8.25a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75v5.25h2.75a.25.25 0 0 0 .25-.25V6.23a.25.25 0 0 0-.094-.195Z', 'github': 'M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z', 'copy': 'M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z', 'check': 'M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z'};
+var utterancesLoad=0;
+
+let themeSettings={
+    "dark": ["dark","moon","#00f0ff","dark-blue"],
+    "light": ["light","sun","#ff5000","github-light"],
+    "auto": ["auto","sync","","preferred-color-scheme"]
+};
+function changeTheme(mode, icon, color, utheme){
+    document.documentElement.setAttribute("data-color-mode",mode);
+    document.getElementById("themeSwitch").setAttribute("d",value=IconList[icon]);
+    document.getElementById("themeSwitch").parentNode.style.color=color;
+    if(utterancesLoad==1){utterancesTheme(utheme);}
+}
+function modeSwitch(){
+    let currentMode=document.documentElement.getAttribute('data-color-mode');
+    let newMode = currentMode === "light" ? "dark" : currentMode === "dark" ? "auto" : "light";
+    localStorage.setItem("meek_theme", newMode);
+    if(themeSettings[newMode]){
+        changeTheme(...themeSettings[newMode]);
+    }
+}
+function utterancesTheme(theme){
+    const message={type:'set-theme',theme: theme};
+    const iframe=document.getElementsByClassName('utterances-frame')[0];
+    iframe.contentWindow.postMessage(message,'https://utteranc.es');
+}
+if(themeSettings[theme]){changeTheme(...themeSettings[theme]);}
+console.log("\n %c Gmeek last https://github.com/Meekdai/Gmeek \n","padding:5px 0;background:#02d81d;color:#fff");
+</script>
+
+<script>
+document.getElementById("pathHome").setAttribute("d",IconList["home"]);
+document.getElementById("pathIssue").setAttribute("d",IconList["github"]);
+
+
+
+function openComments(){
+    cm=document.getElementById("comments");
+    cmButton=document.getElementById("cmButton");
+    cmButton.innerHTML="loading";
+    span=document.createElement("span");
+    span.setAttribute("class","AnimatedEllipsis");
+    cmButton.appendChild(span);
+
+    script=document.createElement("script");
+    script.setAttribute("src","https://utteranc.es/client.js");
+    script.setAttribute("repo","captain0005/captain");
+    script.setAttribute("issue-term","title");
+    
+    if(localStorage.getItem("meek_theme")=="dark"){script.setAttribute("theme","dark-blue");}
+    else if(localStorage.getItem("meek_theme")=="light") {script.setAttribute("theme","github-light");}
+    else{script.setAttribute("theme","preferred-color-scheme");}
+    
+    script.setAttribute("crossorigin","anonymous");
+    script.setAttribute("async","");
+    cm.appendChild(script);
+
+    int=self.setInterval("iFrameLoading()",200);
+}
+
+function iFrameLoading(){
+    var utterances=document.getElementsByClassName('utterances');
+    if(utterances.length==1){
+        if(utterances[0].style.height!=""){
+            utterancesLoad=1;
+            int=window.clearInterval(int);
+            document.getElementById("cmButton").style.display="none";
+            console.log("utterances Load OK");
+        }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const createClipboardHTML = (codeContent, additionalClasses = '') => `
+        <pre class="notranslate"><code class="notranslate">${codeContent}</code></pre>
+        <div class="clipboard-container position-absolute right-0 top-0 ${additionalClasses}">
+            <clipboard-copy class="ClipboardButton btn m-2 p-0" role="button" style="display: inherit;">
+                <svg height="16" width="16" class="octicon octicon-copy m-2"><path d="${IconList["copy"]}"></path></svg>
+                <svg height="16" width="16" class="octicon octicon-check color-fg-success m-2 d-none"><path d="${IconList["check"]}"></path></svg>
+            </clipboard-copy>
+            <div class="copy-feedback">Copied!</div>
+        </div>
+    `;
+
+    const handleCodeElements = (selector = '') => {
+        document.querySelectorAll(selector).forEach(codeElement => {
+            const codeContent = codeElement.innerHTML;
+            const newStructure = document.createElement('div');
+            newStructure.className = 'snippet-clipboard-content position-relative overflow-auto';
+            newStructure.innerHTML = createClipboardHTML(codeContent);
+
+            const parentElement = codeElement.parentElement;
+            if (selector.includes('highlight')) {
+                parentElement.insertBefore(newStructure, codeElement.nextSibling);
+                parentElement.removeChild(codeElement);
+            } else {
+                parentElement.parentElement.replaceChild(newStructure, parentElement);
+            }
+        });
+    };
+
+    handleCodeElements('pre.notranslate > code.notranslate');
+    handleCodeElements('div.highlight > pre.notranslate');
+
+    let currentFeedback = null;
+    document.querySelectorAll('clipboard-copy').forEach(copyButton => {
+        copyButton.addEventListener('click', () => {
+            const codeContent = copyButton.closest('.snippet-clipboard-content').innerText;
+            const tempTextArea = document.createElement('textarea');
+            tempTextArea.value = codeContent;
+            document.body.appendChild(tempTextArea);
+            tempTextArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(tempTextArea);
+
+            const copyIcon = copyButton.querySelector('.octicon-copy');
+            const checkIcon = copyButton.querySelector('.octicon-check');
+            const copyFeedback = copyButton.nextElementSibling;
+
+            if (currentFeedback && currentFeedback !== copyFeedback) {currentFeedback.style.display = 'none';}
+            currentFeedback = copyFeedback;
+
+            copyIcon.classList.add('d-none');
+            checkIcon.classList.remove('d-none');
+            copyFeedback.style.display = 'block';
+            copyButton.style.borderColor = 'var(--color-success-fg)';
+
+            setTimeout(() => {
+                copyIcon.classList.remove('d-none');
+                checkIcon.classList.add('d-none');
+                copyFeedback.style.display = 'none';
+                copyButton.style.borderColor = '';
+            }, 2000);
+        });
+    });
+});
+
+</script>
+
+
+</html>

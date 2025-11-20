@@ -1,5 +1,220 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Thu, 20 Nov 2025 02:12:56 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>Boost Http服务端-同步方式</title><link>https://captain0005.github.io/captain/post/Boost%20Http-fu-wu-duan---tong-bu-fang-shi.html</link><description>```
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Thu, 20 Nov 2025 07:46:16 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>Async-HttpServer 异步http服务</title><link>https://captain0005.github.io/captain/post/Async-HttpServer%20-yi-bu-http-fu-wu.html</link><description>```
+#include &lt;boost/asio.hpp&gt;
+#include &lt;boost/beast.hpp&gt;
+#include &lt;boost/json.hpp&gt;
+#include &lt;iostream&gt;
+#include &lt;functional&gt;
+#include &lt;map&gt;
+#include &lt;string&gt;
+#include &lt;thread&gt;
+#include &lt;boost/thread.hpp&gt;
+#include &lt;csignal&gt;
+#include &lt;vector&gt;
+#include &lt;memory&gt;
+
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace json = boost::json;
+using tcp = asio::ip::tcp;
+
+// 全局标志，用于控制服务器退出
+volatile std::sig_atomic_t g_running = true;
+
+// 信号处理函数
+void signalHandler(int signal) {
+    std::cout &lt;&lt; 'Received signal ' &lt;&lt; signal &lt;&lt; ', shutting down...' &lt;&lt; std::endl;
+    g_running = false;
+}
+
+// 定义处理器函数类型
+typedef std::function&lt;void(const http::request&lt;http::string_body&gt;&amp;, http::response&lt;http::string_body&gt;&amp;)&gt; RequestHandler;
+
+// 路由管理器类，用于注册和查找路由
+class Router {
+private:
+    std::map&lt;std::string, RequestHandler&gt; routes;
+    std::string getRouteKey(http::verb method, const std::string&amp; target) {
+        return std::to_string(static_cast&lt;int&gt;(method)) + ':' + target;
+    }
+public:
+    void registerRoute(http::verb method, const std::string&amp; target, RequestHandler handler) {
+        std::string key = getRouteKey(method, target);
+        routes[key] = handler;
+    }
+    bool handleRequest(const http::request&lt;http::string_body&gt;&amp; req, http::response&lt;http::string_body&gt;&amp; res) {
+        std::string key = getRouteKey(req.method(), std::string(req.target()));
+        auto it = routes.find(key);
+        if (it != routes.end()) {
+            it-&gt;second(req, res);
+            return true;
+        }
+        return false;
+    }
+};
+
+// 全局路由管理器实例
+Router g_router;
+
+// 初始化路由表
+void initializeRoutes() {
+    g_router.registerRoute(http::verb::get, '/status', [](const http::request&lt;http::string_body&gt;&amp; req, http::response&lt;http::string_body&gt;&amp; res) {
+        json::object response_json;
+        response_json['status'] = 'Server is running!';
+        res.result(http::status::ok);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+
+    g_router.registerRoute(http::verb::post, '/greet', [](const http::request&lt;http::string_body&gt;&amp; req, http::response&lt;http::string_body&gt;&amp; res) {
+        json::object response_json;
+        try {
+            json::value parsed_body = json::parse(req.body());
+            std::string name = parsed_body.as_object()['name'].as_string().c_str();
+            response_json['message'] = 'Hello, ' + name + '!';
+        } catch (...) {
+            response_json['error'] = 'Invalid JSON format.';
+        }
+        res.result(http::status::ok);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    });
+    // 可以根据需要继续添加更多路由...
+}
+
+// 处理请求的函数
+void handle_request(
+    http::request&lt;http::string_body&gt; req,
+    http::response&lt;http::string_body&gt;&amp; res
+) {
+    json::object response_json;
+    std::cout &lt;&lt; 'Method: ' &lt;&lt; req.method() &lt;&lt; '...\n';
+    std::cout &lt;&lt; 'Target: ' &lt;&lt; req.target() &lt;&lt; '...\n';
+    std::cout &lt;&lt; 'Body: ' &lt;&lt; req.body() &lt;&lt; '...\n\n';
+    if (!g_router.handleRequest(req, res)) {
+        response_json['error'] = 'Unknown endpoint.';
+        res.result(http::status::not_found);
+        res.set(http::field::content_type, 'application/json');
+        res.body() = json::serialize(response_json);
+        res.prepare_payload();
+    }
+}
+
+// 异步会话类
+class Session : public std::enable_shared_from_this&lt;Session&gt; {
+public:
+    Session(tcp::socket socket)
+        : socket_(std::move(socket)) {}
+
+    void start() {
+        do_read();
+    }
+
+private:
+    tcp::socket socket_;
+    beast::flat_buffer buffer_;
+    http::request&lt;http::string_body&gt; req_;
+
+    void do_read() {
+        auto self = shared_from_this();
+        http::async_read(socket_, buffer_, req_,
+            [self](beast::error_code ec, std::size_t) {
+                if (!ec) {
+                    self-&gt;handle_request();
+                }
+                // 连接关闭由客户端控制，或可在此处关闭
+            });
+    }
+
+    void handle_request() {
+        http::response&lt;http::string_body&gt; res;
+        ::handle_request(req_, res);
+
+        auto self = shared_from_this();
+        http::async_write(socket_, res,
+            [self](beast::error_code ec, std::size_t) {
+                beast::error_code ignore_ec;
+                self-&gt;socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                // 会话对象自动析构
+            });
+    }
+};
+
+// 异步accept
+void do_accept(asio::io_context&amp; ioc, tcp::acceptor&amp; acceptor) {
+    acceptor.async_accept(
+        [&amp;ioc, &amp;acceptor](beast::error_code ec, tcp::socket socket) {
+            if (!ec) {
+                std::make_shared&lt;Session&gt;(std::move(socket))-&gt;start();
+            }
+            if (g_running) {
+                do_accept(ioc, acceptor);
+            }
+        }
+    );
+}
+
+// 异步服务器主函数
+void run_server(asio::io_context&amp; ioc, unsigned short port, unsigned int thread_pool_size) {
+    tcp::acceptor acceptor(ioc, tcp::endpoint(tcp::v4(), port));
+    do_accept(ioc, acceptor);
+
+    std::cout &lt;&lt; 'HTTP Server running on port ' &lt;&lt; port &lt;&lt; '...\n\n';
+    std::vector&lt;std::thread&gt; threads;
+    for (unsigned int i = 0; i &lt; thread_pool_size; ++i) {
+        threads.emplace_back([&amp;ioc]() { ioc.run(); });
+    }
+    for (auto&amp; t : threads) t.join();
+    std::cout &lt;&lt; 'Server shutdown complete\n';
+}
+
+int main() {
+    try {
+        std::signal(SIGINT, signalHandler);
+        std::signal(SIGTERM, signalHandler);
+
+        initializeRoutes();
+        asio::io_context io_context;
+
+        unsigned int thread_pool_size = std::thread::hardware_concurrency();
+        if (thread_pool_size == 0)
+            thread_pool_size = 4;
+        run_server(io_context, 8080, thread_pool_size);
+    }
+    catch (std::exception&amp; e) {
+        std::cerr &lt;&lt; 'Server error: ' &lt;&lt; e.what() &lt;&lt; '\n';
+    }
+    return 0;
+}
+```
+###run_server函数是异步HTTP服务器的核心启动与管理函数，主要功能如下：
+
+**服务器初始化与启动：**
+
+创建TCP acceptor并绑定到指定的IPv4端口
+调用do_accept函数启动异步连接接受循环，使服务器能够非阻塞地接受新连接
+输出服务器启动信息，指示服务器正在哪个端口运行
+**线程池创建与管理：**
+
+创建std::vector&lt;std::thread&gt;容器来管理工作线程池
+根据thread_pool_size参数，创建指定数量的工作线程
+每个线程都运行io_context.run()，启动I/O事件循环
+选中的代码行threads.emplace_back([&amp;ioc]() { ioc.run(); });创建一个新线程并捕获io_context引用，使该线程开始处理异步操作队列
+**服务器生命周期管理：**
+
+使用join()等待所有工作线程完成，确保服务器优雅关闭
+线程池中的所有线程共享同一个io_context实例，协同处理异步事件
+当io_context停止时（通常由信号处理器设置g_running=false触发），所有线程会退出其事件循环
+输出服务器关闭完成的信息
+**工作原理：**
+
+这种设计采用了Boost.Asio的'线程池 + 单io_context'模式，提高了服务器处理并发请求的能力
+主线程负责初始化和等待，而工作线程处理实际的网络I/O事件
+异步接受连接和异步处理请求相结合，实现了高性能的非阻塞服务器架构
+该函数是整个异步HTTP服务器的骨架，通过线程池机制充分利用多核CPU资源，同时保持异步非阻塞的高效特性。</description><guid isPermaLink="true">https://captain0005.github.io/captain/post/Async-HttpServer%20-yi-bu-http-fu-wu.html</guid><pubDate>Thu, 20 Nov 2025 07:45:46 +0000</pubDate></item><item><title>Boost Http服务端-同步方式</title><link>https://captain0005.github.io/captain/post/Boost%20Http-fu-wu-duan---tong-bu-fang-shi.html</link><description>```
 #include &lt;boost/asio.hpp&gt;
 #include &lt;boost/beast.hpp&gt;
 #include &lt;boost/json.hpp&gt;
