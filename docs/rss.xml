@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Thu, 20 Nov 2025 07:46:16 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>Async-HttpServer 异步http服务</title><link>https://captain0005.github.io/captain/post/Async-HttpServer%20-yi-bu-http-fu-wu.html</link><description>```
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>Blog Title</title><link>https://captain0005.github.io/captain</link><description>Blog description</description><copyright>Blog Title</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://captain0005.github.io/captain</link></image><lastBuildDate>Fri, 21 Nov 2025 08:27:03 +0000</lastBuildDate><managingEditor>Blog Title</managingEditor><ttl>60</ttl><webMaster>Blog Title</webMaster><item><title>Async-HttpServer 异步http服务</title><link>https://captain0005.github.io/captain/post/Async-HttpServer%20-yi-bu-http-fu-wu.html</link><description>```
 #include &lt;boost/asio.hpp&gt;
 #include &lt;boost/beast.hpp&gt;
 #include &lt;boost/json.hpp&gt;
@@ -128,8 +128,9 @@ private:
                 // 连接关闭由客户端控制，或可在此处关闭
             });
     }
-
+    /*
     void handle_request() {
+
         http::response&lt;http::string_body&gt; res;
         ::handle_request(req_, res);
 
@@ -140,7 +141,24 @@ private:
                 self-&gt;socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
                 // 会话对象自动析构
             });
-    }
+    }*/
+    void handle_request() {
+          /* code */
+          //http::response&lt;http::string_body&gt; res_;
+          auto res_ptr = std::make_shared&lt;http::response&lt;http::string_body&gt;&gt;();
+          ::handle_request(req_, *res_ptr);
+  
+          auto self = shared_from_this();
+          http::async_write(socket_,  *res_ptr,
+              [self, res_ptr](beast::error_code ec, std::size_t) {
+                  if (ec &amp;&amp; ec != http::error::end_of_stream &amp;&amp; ec != asio::error::eof) {
+                      std::cerr &lt;&lt; 'Write error: ' &lt;&lt; ec.message() &lt;&lt; std::endl;
+                  }
+                  beast::error_code ignore_ec;
+                  self-&gt;socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                  // 会话对象自动析构
+              });
+      }
 };
 
 // 异步accept

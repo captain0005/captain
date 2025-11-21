@@ -139,8 +139,9 @@ private:
                 // 连接关闭由客户端控制，或可在此处关闭
             });
     }
-
+    /*
     void handle_request() {
+
         http::response<http::string_body> res;
         ::handle_request(req_, res);
 
@@ -151,7 +152,24 @@ private:
                 self->socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
                 // 会话对象自动析构
             });
-    }
+    }*/
+    void handle_request() {
+          /* code */
+          //http::response<http::string_body> res_;
+          auto res_ptr = std::make_shared<http::response<http::string_body>>();
+          ::handle_request(req_, *res_ptr);
+  
+          auto self = shared_from_this();
+          http::async_write(socket_,  *res_ptr,
+              [self, res_ptr](beast::error_code ec, std::size_t) {
+                  if (ec && ec != http::error::end_of_stream && ec != asio::error::eof) {
+                      std::cerr << 'Write error: ' << ec.message() << std::endl;
+                  }
+                  beast::error_code ignore_ec;
+                  self->socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                  // 会话对象自动析构
+              });
+      }
 };
 
 // 异步accept
@@ -356,8 +374,9 @@ private:
                 // 连接关闭由客户端控制，或可在此处关闭
             });
     }
-
+    /*
     void handle_request() {
+
         http::response<http::string_body> res;
         ::handle_request(req_, res);
 
@@ -368,7 +387,24 @@ private:
                 self->socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
                 // 会话对象自动析构
             });
-    }
+    }*/
+    void handle_request() {
+          /* code */
+          //http::response<http::string_body> res_;
+          auto res_ptr = std::make_shared<http::response<http::string_body>>();
+          ::handle_request(req_, *res_ptr);
+  
+          auto self = shared_from_this();
+          http::async_write(socket_,  *res_ptr,
+              [self, res_ptr](beast::error_code ec, std::size_t) {
+                  if (ec && ec != http::error::end_of_stream && ec != asio::error::eof) {
+                      std::cerr << 'Write error: ' << ec.message() << std::endl;
+                  }
+                  beast::error_code ignore_ec;
+                  self->socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                  // 会话对象自动析构
+              });
+      }
 };
 
 // 异步accept
@@ -641,8 +677,9 @@ private:
                 // 连接关闭由客户端控制，或可在此处关闭
             });
     }
-
+    /*
     void handle_request() {
+
         http::response&lt;http::string_body&gt; res;
         ::handle_request(req_, res);
 
@@ -653,7 +690,24 @@ private:
                 self-&gt;socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
                 // 会话对象自动析构
             });
-    }
+    }*/
+    void handle_request() {
+          /* code */
+          //http::response&lt;http::string_body&gt; res_;
+          auto res_ptr = std::make_shared&lt;http::response&lt;http::string_body&gt;&gt;();
+          ::handle_request(req_, *res_ptr);
+  
+          auto self = shared_from_this();
+          http::async_write(socket_,  *res_ptr,
+              [self, res_ptr](beast::error_code ec, std::size_t) {
+                  if (ec &amp;&amp; ec != http::error::end_of_stream &amp;&amp; ec != asio::error::eof) {
+                      std::cerr &lt;&lt; "Write error: " &lt;&lt; ec.message() &lt;&lt; std::endl;
+                  }
+                  beast::error_code ignore_ec;
+                  self-&gt;socket_.shutdown(tcp::socket::shutdown_send, ignore_ec);
+                  // 会话对象自动析构
+              });
+      }
 };
 
 // 异步accept
@@ -758,7 +812,11 @@ Session::start()方法被调用，启动请求处理流程<br>
 共享执行上下文：多线程共享同一个io_context，避免了线程间同步的复杂性<br>
 任务调度：Boost.Asio自动负责将异步任务分发给可用线程，实现负载均衡<br>
 零拷贝优化：通过std::move避免不必要的数据拷贝，提高性能<br>
-这种设计使得服务器能够高效处理大量并发连接，每个连接的各个阶段（接受、读取、处理、响应）可能在不同的线程上执行，但都是由同一个线程池统一调度管理。</p></div>
+这种设计使得服务器能够高效处理大量并发连接，每个连接的各个阶段（接受、读取、处理、响应）可能在不同的线程上执行，但都是由同一个线程池统一调度管理。</p>
+<blockquote>
+<p>需要注意的是<br>
+handle_request() 函数中http::async_write 的第二个参数不能使用局部变量的原因是因为async_write 是个异步函数，在handle_request() 执行完成后，第二个参数已经被释放。async_write中的回调函数后台会访问，造成崩溃，所以使用智能指针的方式，让其在回调函数中依然有效，</p>
+</blockquote></div>
 <div style="font-size:small;margin-top:8px;float:right;"></div>
 
 <button class="btn btn-block" type="button" onclick="openComments()" id="cmButton">评论</button>
